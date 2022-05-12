@@ -1,0 +1,2 @@
+CUDA_VISIBLE_DEVICES=1,2,3,4 python cluster_contrast_train_usl.py -b 256 -a resnet50 -d market1501 --iters 200 --att True --momentum 0.1 --eps 0.5 --num-instances 16 --epochs 60 --pooling-type avg  --logs-dir logs9/Market_logs_b256_i16_iters200_eps0.2_bal_0.6_mom_0.1
+CUDA_VISIBLE_DEVICES=1,2,3,4 python cluster_contrast_train_usl.py -b 256 -a resnet50 -d dukemtmcreid --iters 200 --att True --momentum 0.1 --momentum1 0.0 --eps 0.6 --num-instances 16 --epochs 60 --pooling-type avg  --logs-dir logs5/duke_logs_b256_i16_iters200_eps0.6_mom_0.1
