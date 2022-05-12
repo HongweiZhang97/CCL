@@ -3,10 +3,6 @@
 
 # Camera Contrast Learning for Unsupervised Person Re-Identification
 
-
-## Requirements
-Pytorch >= 1.8
-
 ### Prepare Datasets
 ```shell
 cd examples && mkdir data
