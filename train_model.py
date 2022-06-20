@@ -29,7 +29,6 @@ from reid.utils.data.preprocessor import Preprocessor
 from reid.utils.logging import Logger
 from reid.utils.serialization import load_checkpoint, save_checkpoint
 from reid.utils.faiss_rerank import compute_jaccard_distance
-from reid.scatter_based_metric import cal_scatter
 
 start_epoch = best_mAP = 0
 
@@ -63,10 +62,17 @@ def get_train_loader(args, dataset, height, width, batch_size, workers,
         # sampler = RandomIdentityCamSampler(train_set, num_instances)
     else:
         sampler = None
+    load_size = iters
+
+
+    # load_size = int(float(len(dataset.train))/batch_size)
+    # print("using adp loader")
+    # load_size = int(float(len(train_set))/batch_size) * 2#* args.cam_num
+    # print("using cam adp loader")
     train_loader = IterLoader(
         DataLoader(Preprocessor(train_set, root=dataset.images_dir, transform=train_transformer),
                    batch_size=batch_size, num_workers=workers, sampler=sampler,
-                   shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+                   shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=load_size)
 
     return train_loader
 
@@ -94,8 +100,7 @@ def get_test_loader(dataset, height, width, batch_size, workers, testset=None):
 
 def create_model(args):
     model = models.create(args.arch, num_features=args.features, norm=True, dropout=args.dropout,
-                          num_classes=0, pooling_type=args.pooling_type, using_local_feat=args.using_local_feat,
-                          num_stripes=args.num_stripes, att=args.att)
+                          num_classes=0, pooling_type=args.pooling_type, att=args.att)
     # use CUDA
     model.cuda()
     model = nn.DataParallel(model)
@@ -103,6 +108,7 @@ def create_model(args):
 
 
 def main():
+    start = time.time()
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -112,6 +118,8 @@ def main():
         cudnn.deterministic = True
 
     main_worker(args)
+    end = time.time()
+    print("total time cost:", end - start)
 
 
 def main_worker(args):
@@ -149,42 +157,25 @@ def main_worker(args):
             cluster_loader = get_test_loader(dataset, args.height, args.width,
                                              args.batch_size, args.workers, testset=sorted(dataset.train))
 
-            features, local_feats, real_labels, _ = extract_features(model, cluster_loader, print_freq=50, using_local_feat=args.using_local_feat)
+            features, local_feats, real_labels, _ = extract_features(model, cluster_loader, print_freq=50)
             features = torch.cat([features[f].unsqueeze(0) for f, _, _ in sorted(dataset.train)], 0)
 
             if epoch == 0:
                 # DBSCAN cluster
-                if args.eps0 > 0.0:
-                    print('Clustering criterion: eps0: {:.4f}'.format(args.eps0))
-                    print('Clustering criterion: eps1: {:.4f}'.format(args.eps))
-                    cluster0 = DBSCAN(eps=args.eps0, min_samples=4, metric='precomputed', n_jobs=-1)
-                    cluster1 = DBSCAN(eps=args.eps, min_samples=4, metric='precomputed', n_jobs=-1)
-                else:
-                    eps = args.eps
-                    print('Clustering criterion: eps: {:.4f}'.format(eps))
-                    cluster = DBSCAN(eps=eps, min_samples=4, metric='precomputed', n_jobs=-1)
+                eps = args.eps
+                print('Clustering criterion: eps: {:.4f}'.format(eps))
+                cluster = DBSCAN(eps=eps, min_samples=4, metric='precomputed', n_jobs=-1)
 
             # select & cluster images as training set of this epochs
-            if args.eps0 > 0.0:
-                rerank_dist0 = compute_jaccard_distance(features, k1=args.k1, k2=args.k2)
-                stage0_label = cluster0.fit_predict(rerank_dist0)
-                num_cluster0 = len(set(stage0_label)) - (1 if -1 in stage0_label else 0)
-                print('==> Statistics for epoch {}: {} clusters0'.format(epoch, num_cluster0))
-
-                # relabel noisy samples
-                ori_label = np.max(stage0_label)
-                max_label = ori_label
-                for i in range(len(stage0_label)):
-                    if stage0_label[i] < 0:
-                        stage0_label[i] = max_label + 1
-                        max_label += 1
-
-                print("max stage0_label before after", ori_label, max_label)
-                rerank_dist1 = cal_scatter(features, stage0_label)
-                pseudo_labels = cluster1.fit_predict(rerank_dist1)
+            if args.wgt:
+                print("with ground truth label")
+                real_labels = torch.cat([real_labels[f].unsqueeze(0) for f, _, _ in sorted(dataset.train)])
+                pseudo_labels = real_labels.numpy()
             else:
+                print("with clustered label")
                 rerank_dist = compute_jaccard_distance(features, k1=args.k1, k2=args.k2)
                 pseudo_labels = cluster.fit_predict(rerank_dist)
+
 
             num_cluster = len(set(pseudo_labels)) - (1 if -1 in pseudo_labels else 0)
 
@@ -210,7 +201,7 @@ def main_worker(args):
 
         # Create hybrid memory
         memory = ClusterMemory(model.module.num_features, num_cluster, temp=args.temp,
-                               momentum=args.momentum, use_hard=args.use_hard).cuda()
+                               momentum=args.momentum, use_hard=args.use_hard, loss_type=args.loss_type, margin=args.margin).cuda()
 
         memory.cluster_features = cluster_features
         trainer.memory = memory
@@ -221,7 +212,6 @@ def main_worker(args):
                 pseudo_labeled_dataset.append((fname, label.item(), cid))
 
         print('==> Statistics for epoch {}: {} clusters'.format(epoch, num_cluster))
-
         train_loader = get_train_loader(args, dataset, args.height, args.width,
                                         args.batch_size, args.workers, args.num_instances, iters,
                                         trainset=pseudo_labeled_dataset)
@@ -243,6 +233,7 @@ def main_worker(args):
 
             print('\n * Finished epoch {:3d}  model mAP: {:5.1%}  best: {:5.1%}{}\n'.
                   format(epoch, mAP, best_mAP, ' *' if is_best else ''))
+            print("epoch time cost", time.time() - start_time)
 
         lr_scheduler.step()
 
@@ -262,7 +253,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-d', '--dataset', type=str, default='dukemtmcreid',
                         choices=datasets.names())
-    parser.add_argument('-b', '--batch-size', type=int, default=2)
+    parser.add_argument('-b', '--batch-size', type=int, default=256)
     parser.add_argument('-j', '--workers', type=int, default=4)
     parser.add_argument('--height', type=int, default=256, help="input height")
     parser.add_argument('--width', type=int, default=128, help="input width")
@@ -285,7 +276,11 @@ if __name__ == '__main__':
 
     # model
     parser.add_argument('--using_local_feat', type=bool, default=False)
-    parser.add_argument('--att', type=bool, default=False)
+    parser.add_argument('--att', type=int, default=4)
+    parser.add_argument('--wgt', type=bool, default=False)
+    parser.add_argument('--margin', type=float, default=0.2)
+
+
 
     parser.add_argument('--num_stripes', type=int, default=4)
 
@@ -305,6 +300,7 @@ if __name__ == '__main__':
     parser.add_argument('--iters', type=int, default=400)
     parser.add_argument('--step-size', type=int, default=20)
     # training configs
+    parser.add_argument('--bal', type=float, default=0.5)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--print-freq', type=int, default=20)
     parser.add_argument('--eval-step', type=int, default=10)
@@ -317,5 +313,6 @@ if __name__ == '__main__':
     parser.add_argument('--logs-dir', type=str, metavar='PATH',
                         default=osp.join(working_dir, 'logs'))
     parser.add_argument('--pooling-type', type=str, default='avg')
+    parser.add_argument('--loss-type', type=str, default='ce')
     parser.add_argument('--use-hard', action="store_true")
     main()
