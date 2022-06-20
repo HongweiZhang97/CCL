@@ -16,7 +16,6 @@ class ClusterMemory(nn.Module, ABC):
         self.num_samples = num_samples
 
         self.momentum = momentum
-        self.momentum1 = momemtum1
         self.temp = temp
         self.use_hard = use_hard
         self.register_buffer('cluster_features', torch.zeros(num_samples, num_features))
