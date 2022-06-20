@@ -4,7 +4,6 @@ from abc import ABC
 import torch
 import torch.nn.functional as F
 from torch import nn, autograd
-from ..utils.pair_att import pair_att_sims, min_dim_sims
 
 from torch.autograd import Variable, Function
 
