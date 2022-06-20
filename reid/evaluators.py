@@ -11,8 +11,6 @@ from .evaluation_metrics import cmc, mean_ap
 from .utils.meters import AverageMeter
 from .utils.rerank import re_ranking
 from .utils import to_torch
-from .utils.pair_att import max_dim_dist
-
 
 def extract_cnn_feature(model, inputs):
     inputs = to_torch(inputs).cuda()
